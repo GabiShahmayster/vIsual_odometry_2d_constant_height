@@ -4,20 +4,25 @@ import numpy as np
 from cv2 import cvtColor, COLOR_BGR2GRAY, imshow, waitKey, imread, ORB_create, ORB
 from recordclass import RecordClass
 from abc import ABC, abstractmethod
+from enum import Enum
 
 
-class FrameFeatures(RecordClass):
+class ProcessedFrameData(RecordClass):
     """
-    This object aggregates frame features data (keypoints and descriptors) into a single data object
+    This object aggregates frame + extracted features (keypoints and descriptors) into a single data object
     """
+    frame: np.ndarray
     keypoints: List[Tuple]
     descriptors: List[object]
 
     @classmethod
-    def build(cls, keypoints: List[Tuple],
+    def build(cls,
+              frame: np.ndarray,
+              keypoints: List[Tuple],
               descriptors: List[object]):
-        return FrameFeatures(keypoints,
-                             descriptors)
+        return ProcessedFrameData(frame,
+                                  keypoints,
+                                  descriptors)
 
 
 class FeaturesExtractorAbstractBase(ABC):
@@ -30,7 +35,7 @@ class FeaturesExtractorAbstractBase(ABC):
     feature_extractor: object
 
     @abstractmethod
-    def extract_features(self) -> FrameFeatures:
+    def extract_features(self) -> ProcessedFrameData:
         """
         This method extracts features from a frame
         Returns
@@ -67,10 +72,19 @@ class OrbFeaturesExtractor(FeaturesExtractorAbstractBase):
                                             nlevels=nlevels,
                                             edgeThreshold=edgeThreshold)
 
-    def extract_features(self) -> FrameFeatures:
+    def extract_features(self) -> ProcessedFrameData:
         keypoints, descriptors = self.feature_extractor.detectAndCompute()
-        return FrameFeatures.build(keypoints=keypoints,
-                                   descriptors=descriptors)
+        return ProcessedFrameData.build(frame=,
+                                        keypoints=keypoints,
+                                        descriptors=descriptors)
+
+
+class MotionEstimationStatus(Enum):
+    """
+    This enum indicates the motion estimation algorithm status
+    """
+    WAITING_FOR_FIRST_FRAME = 0
+    UPDATED_MOTION_UNAVAILABLE = 1
 
 
 class RobotHorizontalMotionEstimator:
@@ -79,27 +93,36 @@ class RobotHorizontalMotionEstimator:
     using an incoming video stream from a down-facing camera
     """
     features_extractor: Type[FeaturesExtractorAbstractBase]
-    previous_frame: Optional[np.ndarray]
+    previous_frame_data: Optional[ProcessedFrameData]
     robot_height_in_meter: float
+    current_robot_position: Optional[Tuple]
+    motion_estimation_status: MotionEstimationStatus
 
     def __init__(self, robot_height_in_meter: float):
         self.features_extractor = OrbFeaturesExtractor()
-        self.previous_frame = None
         self.robot_height_in_meter = robot_height_in_meter
+        self.init_motion_estimation()
 
-    def set_new_frame(self, new_frame: np.ndarray):
+    def init_motion_estimation(self):
+        """
+        This method initializes the motion estimation block
+        """
+        self.previous_frame_data = None
+        self.motion_estimation_status = MotionEstimationStatus.WAITING_FOR_FIRST_FRAME
+
+    def set_new_frame(self, raw_frame: np.ndarray):
         """
         This method passes a new frame to the motion estimation class
         Parameters
         ----------
-        new_frame
+        raw_frame
 
         Returns
         -------
 
         """
-        processed_frame: np.ndarray = self.prepare_frame(frame=new_frame)
-        self.update_motion_using_new_frame(new_frame=processed_frame)
+        frame: np.ndarray = self.prepare_frame(frame=raw_frame)
+        self.update_motion_using_new_frame(frame=frame)
 
     def prepare_frame(self, frame: np.ndarray) -> Optional[np.ndarray]:
         """
@@ -110,50 +133,51 @@ class RobotHorizontalMotionEstimator:
         """
         return cvtColor(frame, COLOR_BGR2GRAY)
 
-    def update_motion_using_new_frame(self, new_frame: np.ndarray) -> Optional[Tuple]:
+    def process_frame(self, frame: np.ndarray) -> ProcessedFrameData:
+        """
+        This method extracts features from a frame and returns an aggregated ProcessedFrameData object
+        """
+        keypoints, descriptors = self.features_extractor.detectAndCompute(frame, None)
+        return ProcessedFrameData.build(frame=frame,
+                                        keypoints=keypoints,
+                                        descriptors=descriptors)
+
+    def update_motion_using_new_frame(self, frame: np.ndarray) -> Optional[Tuple]:
         """
         This method
         Parameters
         ----------
-        new_frame
+        frame
 
         Returns
         -------
 
         """
-        if self.previous_frame is None:
+        processed_frame: ProcessedFrameData = self.process_frame(frame=frame)
+        if self.previous_frame_data is None:
             # first frame, cannot estimate motion
-            self.previous_frame = new_frame
+            self.previous_frame_data = processed_frame
+            self.motion_estimation_status = MotionEstimationStatus.UPDATED_MOTION_UNAVAILABLE
             return None
 
-    def estimate_horizontal_translation(self,
-                                        frame_1_path: str,
-                                        frame_2_path: str,
-                                        robot_height_in_meter: float) -> Optional[Tuple]:
+        self.current_robot_position =
+
+    def update_motion(self):
         """
         This method estimates the horizontal translation of a robot, navigating above a ground-plance,
         given two down-facing frames captured by the robot's camera.
         The robot's altitude above the ground-plane is assumed to be known and constant
-        Parameters
-        ----------
-        frame_1_path - absolute path to 1-st frame
-        frame_2_path - absolute path to 2-nd frame
-        robot_height_in_meter - robot height [m]
-        Returns
-        -------
         """
 
-        # TODO assert or convert to BGR color-space
-
-        imshow('first frame', frame_1_gray)
-        imshow('second frame', frame_2_gray)
-
-        # construct ORB features detector
-        orb_detector = ORB_create()
-
-        keypoints, descriptors = orb_detector.detectAndCompute(frame_1_gray)
 
         waitKey(0)
+
+    def print_current_position(self):
+        """
+        This method prints the current position of the robot, if available
+        """
+        if self.current_robot_position is None:
+            print("")
 
 
 if __name__ == "__main__":
@@ -163,11 +187,17 @@ if __name__ == "__main__":
     list_of_frame_paths.append(os.path.join(current_dir, 'test/frame_2.png'))
 
     robot_height_in_meter = 2.5
-    robot_motion_estimator: RobotHorizontalMotionEstimator = RobotHorizontalMotionEstimator(robot_height_in_meter=robot_height_in_meter)
+    robot_motion_estimator: RobotHorizontalMotionEstimator = RobotHorizontalMotionEstimator(
+        robot_height_in_meter=robot_height_in_meter)
 
     for frame_path in list_of_frame_paths:
-
-        robot_motion_estimator.set_new_frame()
+        frame: Optional[np.ndarray] = imread(frame_path)
+        if frame is not None:
+            robot_motion_estimator.set_new_frame()
+            robot_motion_estimator.print_current_position()
+        else:
+            print("cannot read frame")
+            exit(1)
 
     translation: Optional[Tuple] = estimate_horizontal_translation(frame_1_path=frame_1_path,
                                                                    frame_2_path=frame_2_path,
