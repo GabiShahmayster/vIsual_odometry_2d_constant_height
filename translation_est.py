@@ -3,12 +3,30 @@ from typing import Optional, Tuple, List, Type
 import numpy as np
 from cv2 import cvtColor, COLOR_BGR2GRAY, imshow, waitKey, imread, ORB_create, ORB, KeyPoint, drawMarker, MARKER_CROSS, \
     COLOR_GRAY2BGR, BFMatcher, NORM_HAMMING, DMatch, drawMatches, findHomography, RANSAC, decomposeHomographyMat, \
-    Rodrigues, resize, INTER_AREA, findEssentialMat, decomposeEssentialMat, solvePnPRansac, projectPoints
+    Rodrigues, resize, INTER_AREA, findEssentialMat, decomposeEssentialMat, solvePnPRansac, projectPoints, \
+    goodFeaturesToTrack, calcOpticalFlowPyrLK, TERM_CRITERIA_EPS, TERM_CRITERIA_COUNT
 from recordclass import RecordClass
 from abc import ABC, abstractmethod
 from enum import Enum
 
-radiansToDegrees: float = 1 / 180.0 * np.pi
+radiansToDegrees: float = 1 / np.pi * 180.0
+
+
+def get_euler_angles_from_rotation_matrix_ZYX_order(rotation_matrix: np.ndarray) -> Tuple:
+    """
+    Retrieve euler angles from rotation matrix (direction cosine matrix)
+    assuming Z-Y-X order of rotation
+    reference: D.H.Titterton, Strapdown Inertial Navigation, (3.66)
+    @param rotation_matrix, 3X3
+    @param dummy:
+    @return: out[0] - heading euler angle [rad]
+             out[1] - pitch euler angle [rad]
+             out[2] - roll euler angle [rad]
+    """
+    roll_rad = np.arctan2(rotation_matrix[2][1], rotation_matrix[2][2])
+    pitch_rad = np.arcsin(-rotation_matrix[2][0])
+    heading_rad = np.arctan2(rotation_matrix[1][0], rotation_matrix[0][0])
+    return (heading_rad, pitch_rad, roll_rad)
 
 
 class ProcessedFrameData(RecordClass):
@@ -70,6 +88,13 @@ class FeaturesHandlerAbstractBase(ABC):
         This method matches features between frames
         """
 
+    @abstractmethod
+    def is_handler_capable(self, frame: np.ndarray) -> bool:
+        """
+        This method tries to measure this handlers capability to track features for an unknown scene type
+        (i.e illumination, texture, etc)
+        """
+
 
 class OrbFeaturesHandler(FeaturesHandlerAbstractBase):
     """
@@ -80,7 +105,7 @@ class OrbFeaturesHandler(FeaturesHandlerAbstractBase):
 
     DEFAULT_DISTANCE_THRESHOLD_FOR_SUCCESSFULL_FEATURE_MATCH: int = 10
 
-    DEFAULT_nfeatures = 500
+    DEFAULT_nfeatures = 1000
 
     # DEFAULT_scaleFactor = None
     # DEFAULT_nlevels = None
@@ -127,6 +152,72 @@ class OrbFeaturesHandler(FeaturesHandlerAbstractBase):
         # # Sort them in the order of their distance.
         # return
 
+    def is_handler_capable(self, frame: np.ndarray) -> bool:
+        """
+        This method implements ORB handler capability test
+        """
+        extracted_features: ProcessedFrameData = self.extract_features(frame=frame)
+        return len(extracted_features.list_of_keypoints) >= int(0.9 * self.DEFAULT_nfeatures)
+
+
+class ShiTomasiFeaturesHandler(FeaturesHandlerAbstractBase):
+    """
+    This class implements an Shi-Tomasi edge-detector features exractor
+    """
+    features_extractor: object = None
+    features_matcher: object = None
+
+    DEFAULT_DISTANCE_THRESHOLD_FOR_SUCCESSFULL_FEATURE_MATCH: int = 10
+
+    DEFAULT_nfeatures = 1000
+
+    def extract_features(self, frame: np.ndarray) -> ProcessedFrameData:
+        """
+        This method extracts ORB features
+        """
+        res = goodFeaturesToTrack(image=frame,
+                                  maxCorners=self.DEFAULT_nfeatures,
+                                  qualityLevel=0.01,
+                                  minDistance=10)
+        list_of_keypoints: List[KeyPoint] = [KeyPoint(point[0], point[1], -1) for point in list(res.squeeze())]
+        return ProcessedFrameData.build(frame=frame,
+                                        list_of_keypoints=list_of_keypoints,
+                                        descriptors=res)
+
+    def is_handler_capable(self, frame: np.ndarray) -> bool:
+        """
+        This method implements Shi-Tomasi handler capability test
+        """
+        extracted_features: ProcessedFrameData = self.extract_features(frame=frame)
+        return len(extracted_features.list_of_keypoints) >= int(0.9 * self.DEFAULT_nfeatures)
+
+    def match_features(self, frame_1: ProcessedFrameData, frame_2: ProcessedFrameData):
+        """
+        This method uses sparse optical-flow (KLT algorithm)
+        https://docs.opencv.org/2.4/modules/video/doc/motion_analysis_and_object_tracking.html
+        """
+        lk_params = dict(winSize=(5, 5),
+                         maxLevel=2,
+                         criteria=(TERM_CRITERIA_EPS | TERM_CRITERIA_COUNT, 10, 0.03))
+        prev_points: np.ndarray = np.array([(point.pt[0], point.pt[1]) for point in frame_1.list_of_keypoints]).astype(
+            dtype=np.float32)
+        new_points, st, err = calcOpticalFlowPyrLK(frame_1.frame,
+                                                   frame_2.frame,
+                                                   prev_points,
+                                                   None,
+                                                   **lk_params)
+
+        list_of_matches: List[DMatch] = list()
+        for idx, data in enumerate(zip(st.squeeze(), err.squeeze())):
+            status = data[0]
+            err = data[1]
+            if status == 1:
+                queryIdx = idx
+                trainIdx = idx
+                distance = err
+                list_of_matches.append(DMatch(queryIdx, trainIdx, distance))
+        return list_of_matches
+
 
 class MotionEstimationStatus(Enum):
     """
@@ -135,6 +226,7 @@ class MotionEstimationStatus(Enum):
     MOTION_WAITING_FOR_FIRST_FRAME = 0
     MOTION_NOT_UPDATED = 1
     MOTION_OK = 2
+    MOTION_ALGORITHM_INCAPABLE = 3
 
 
 class RobotHorizontalMotionEstimator:
@@ -164,7 +256,6 @@ class RobotHorizontalMotionEstimator:
     def __init__(self, robot_height_in_meter: float,
                  camera_intrinsic: np.ndarray,
                  debug_flag: bool = False):
-        self.features_handler = OrbFeaturesHandler()
         self.robot_height_in_meter = robot_height_in_meter
         self.camera_intrinsic = camera_intrinsic
         self.current_frame_number = 0
@@ -190,8 +281,15 @@ class RobotHorizontalMotionEstimator:
         -------
 
         """
-        self.update_motion_using_new_frame(frame=self.prepare_frame(frame=raw_frame))
         self.current_frame_number += 1
+        prepared_frame: np.ndarray = self.prepare_frame(frame=raw_frame)
+        if self.motion_estimation_status == MotionEstimationStatus.MOTION_WAITING_FOR_FIRST_FRAME:
+            self.init_features_handler(prepared_frame)
+        try:
+            self.update_motion_using_new_frame(frame=prepared_frame)
+        except:
+            self.motion_estimation_status = MotionEstimationStatus.MOTION_NOT_UPDATED
+            return
 
     def prepare_frame(self, frame: np.ndarray) -> Optional[np.ndarray]:
         """
@@ -260,7 +358,7 @@ class RobotHorizontalMotionEstimator:
         # match features
         list_of_matches: List[DMatch] = self.features_handler.match_features(frame_1=self.previous_frame_data,
                                                                              frame_2=new_processed_frame_data)
-        list_of_matches = list_of_matches[:20]
+        list_of_matches = list_of_matches[:100]
         if self.debug_flag:
             imshow("feature matches", mat=self.resize_image(drawMatches(self.previous_frame_data.frame,
                                                                         self.previous_frame_data.list_of_keypoints,
@@ -270,20 +368,10 @@ class RobotHorizontalMotionEstimator:
                                                                         None,
                                                                         flags=2)))
 
-        # find homography
-        # src_pts = np.float32([self.previous_frame_data.list_of_keypoints[match.queryIdx].pt for match in list_of_matches]).reshape(-1, 1, 2)
-        # dst_pts = np.float32([new_processed_frame_data.list_of_keypoints[match.trainIdx].pt for match in list_of_matches]).reshape(-1, 1, 2)
-
         # self.get_camera_motion_using_homography(src_pts, dst_pts)
         # self.get_camera_motion_using_epipolar_constraint(src_pts, dst_pts)
         self.get_camera_motion_using_PnP(list_of_matches,
                                          new_processed_frame_data=new_processed_frame_data)
-        """
-        3. find homography
-        4. decompose homography
-        5. choose rotation & translation
-        6. use known camera height to scale translation
-        """
 
     def print_current_position(self):
         """
@@ -298,6 +386,9 @@ class RobotHorizontalMotionEstimator:
             print("frame #{0:d} | Robot motion unavailable - waiting for 1-st frame".format(self.current_frame_number))
         elif self.motion_estimation_status == MotionEstimationStatus.MOTION_NOT_UPDATED:
             print("frame #{0:d} | Robot motion could not be updated".format(self.current_frame_number))
+        elif self.motion_estimation_status == MotionEstimationStatus.MOTION_ALGORITHM_INCAPABLE:
+            print("frame #{0:d} | Robot motion unavailable - cannot handle this type of scene".format(
+                self.current_frame_number))
 
     def get_camera_motion_using_homography(self, src_pts, dst_pts):
         """
@@ -371,28 +462,53 @@ class RobotHorizontalMotionEstimator:
                                       tvec=np.zeros(3),
                                       cameraMatrix=self.camera_intrinsic,
                                       distCoeffs=None)
+
+        # TODO add test for re-projection error
         reprojection_error = np.linalg.norm(x=re_project.squeeze() - array_of_2D_coords_first_frame,
                                             ord=2)
 
-        retval, rvec, tvec, inliers = solvePnPRansac(objectPoints=array_of_3D_location,
-                                                     imagePoints=array_of_2D_coords_second_frame,
-                                                     cameraMatrix=self.camera_intrinsic,
-                                                     distCoeffs=None)
+        retval, rotation_vector, tvec, inliers = solvePnPRansac(objectPoints=array_of_3D_location,
+                                                                imagePoints=array_of_2D_coords_second_frame,
+                                                                cameraMatrix=self.camera_intrinsic,
+                                                                distCoeffs=None)
+        # convert rotation vector to rotation matrix
+
+        yaw_rad, pitch_rad, roll_rad = get_euler_angles_from_rotation_matrix_ZYX_order(
+            Rodrigues(src=rotation_vector)[0])
         if retval:
             self.motion_estimation_status = MotionEstimationStatus.MOTION_OK
             self.current_robot_pose = RobotPose.build(position_x_meter=tvec[0][0],
                                                       position_y_meter=tvec[1][0],
-                                                      yaw_angle_deg=radiansToDegrees * rvec[2][0])
+                                                      yaw_angle_deg=radiansToDegrees * yaw_rad)
+
+    def init_features_handler(self, prepared_frame: np.ndarray):
+        """
+        This method attempts to choose a features extractor, for an unknown environment
+        """
+        # try ORB features handler
+        self.features_handler = OrbFeaturesHandler()
+        if self.features_handler.is_handler_capable(frame=prepared_frame):
+            # ORB is capable of handling current scene
+            return
+        # try Shi-Tomasi
+        self.features_handler = ShiTomasiFeaturesHandler()
+        if self.features_handler.is_handler_capable(frame=prepared_frame):
+            # Shi-Tomasi is capable of handling current scene
+            return
+        self.motion_estimation_status = MotionEstimationStatus.MOTION_ALGORITHM_INCAPABLE
+        self.features_handler = None
 
 
 if __name__ == "__main__":
     current_dir: str = os.getcwd()
     list_of_frame_paths: List[str] = list()
-    list_of_frame_paths.append(os.path.join(current_dir, 'test/frame_1.png'))
-    list_of_frame_paths.append(os.path.join(current_dir, 'test/frame_2.png'))
-    list_of_frame_paths.append(os.path.join(current_dir, 'test/frame_3.png'))
-    list_of_frame_paths.append(os.path.join(current_dir, 'test/frame_4.png'))
-    list_of_frame_paths.append(os.path.join(current_dir, 'test/frame_5.png'))
+    test_dir_str: str = 'test_mosaic'
+    list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_1.png'))
+    list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_2.png'))
+    # list_of_frame_paths.append(os.path.join(current_dir, test_dir_str,'frame_3.png'))
+    # list_of_frame_paths.append(os.path.join(current_dir, test_dir_str,'frame_4.png'))
+    # list_of_frame_paths.append(os.path.join(current_dir, test_dir_str,'frame_5.png'))
+    # list_of_frame_paths.append(os.path.join(current_dir, test_dir_str,'frame_6.png'))
 
     robot_height_in_meter = 2.5
     camera_intrinsic: np.ndarray = np.array([[1422.0, .0, 1024.0 / 2],
