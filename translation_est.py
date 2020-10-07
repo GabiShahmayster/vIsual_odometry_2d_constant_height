@@ -2,31 +2,47 @@ import os
 from typing import Optional, Tuple, List, Type
 import numpy as np
 from cv2 import cvtColor, COLOR_BGR2GRAY, imshow, waitKey, imread, ORB_create, ORB, KeyPoint, drawMarker, MARKER_CROSS, \
-    COLOR_GRAY2BGR, BFMatcher, NORM_HAMMING, DMatch, drawMatches, findHomography, RANSAC, decomposeHomographyMat, \
-    Rodrigues, resize, INTER_AREA, findEssentialMat, decomposeEssentialMat, solvePnPRansac, projectPoints, \
+    COLOR_GRAY2BGR, BFMatcher, NORM_HAMMING, DMatch, drawMatches, \
+    Rodrigues, resize, INTER_AREA, solvePnPRansac, projectPoints, \
     goodFeaturesToTrack, calcOpticalFlowPyrLK, TERM_CRITERIA_EPS, TERM_CRITERIA_COUNT
 from recordclass import RecordClass
+from collections import namedtuple
 from abc import ABC, abstractmethod
 from enum import Enum
 
 radiansToDegrees: float = 1 / np.pi * 180.0
+EulerAngles = namedtuple('EulerAngles', ['yaw_rad', 'pitch_rad', 'roll_rad'])
 
 
-def get_euler_angles_from_rotation_matrix_ZYX_order(rotation_matrix: np.ndarray) -> Tuple:
+def get_intrinsic_matrix(focal_length_x_pixel: float,
+                         focal_length_y_pixel: float,
+                         skew: float,
+                         principal_point_x_pixel: float,
+                         principal_point_y_pixel: float) -> np.ndarray:
+    """
+    This function constructs an intrinsic calibration matrix, given explicit parameters
+    """
+    return np.array([[focal_length_x_pixel, skew, principal_point_x_pixel],
+                     [.0, focal_length_y_pixel, principal_point_y_pixel],
+                     [.0, .0, 1.0]])
+
+
+def get_euler_angles_from_rotation_matrix_ZYX_order(rotation_matrix: np.ndarray) -> EulerAngles:
     """
     Retrieve euler angles from rotation matrix (direction cosine matrix)
     assuming Z-Y-X order of rotation
     reference: D.H.Titterton, Strapdown Inertial Navigation, (3.66)
     @param rotation_matrix, 3X3
-    @param dummy:
     @return: out[0] - heading euler angle [rad]
              out[1] - pitch euler angle [rad]
              out[2] - roll euler angle [rad]
     """
     roll_rad = np.arctan2(rotation_matrix[2][1], rotation_matrix[2][2])
     pitch_rad = np.arcsin(-rotation_matrix[2][0])
-    heading_rad = np.arctan2(rotation_matrix[1][0], rotation_matrix[0][0])
-    return (heading_rad, pitch_rad, roll_rad)
+    yaw_rad = np.arctan2(rotation_matrix[1][0], rotation_matrix[0][0])
+    return EulerAngles(yaw_rad=yaw_rad,
+                       pitch_rad=pitch_rad,
+                       roll_rad=roll_rad)
 
 
 class ProcessedFrameData(RecordClass):
@@ -107,27 +123,10 @@ class OrbFeaturesHandler(FeaturesHandlerAbstractBase):
 
     DEFAULT_nfeatures = 1000
 
-    # DEFAULT_scaleFactor = None
-    # DEFAULT_nlevels = None
-    # DEFAULT_edgeThreshold = None
-
-    # def __init__(self, nfeatures: int = None,
-    #              scaleFactor=None,
-    #              nlevels: int = None,
-    #              edgeThreshold: float = None):
     def __init__(self):
-        # if nfeatures is None:
-        #     nfeatures = self.DEFAULT_nfeatures
-        # if scaleFactor is None:
-        #     scaleFactor = self.DEFAULT_scaleFactor
-        # if nlevels is None:
-        #     nlevels = self.DEFAULT_nlevels
-        # if edgeThreshold is None:
-        #     edgeThreshold = self.DEFAULT_edgeThreshold
-
         self.features_extractor = ORB_create(nfeatures=self.DEFAULT_nfeatures)
 
-        # ORB uses binary descriptors -> use hamming norm (xor between descriptors)
+        # ORB uses binary descriptors -> use hamming norm (XOR between descriptors)
         self.features_matcher = BFMatcher(NORM_HAMMING, crossCheck=True)
 
     def extract_features(self, frame: np.ndarray) -> ProcessedFrameData:
@@ -250,14 +249,22 @@ class RobotHorizontalMotionEstimator:
 
     RESIZE_RATIO_FOR_DEBUG: int = 2
 
-    DEFAULT_NISTER_PROB: float = .999
-    DEFAULT_NISTER_THRESHOLD: float = 1.0
+    REPROJECTION_TOLERANCE: float = 1e-10
 
     def __init__(self, robot_height_in_meter: float,
-                 camera_intrinsic: np.ndarray,
+                 focal_length_x_pixel: float,
+                 focal_length_y_pixel: float,
+                 skew: float,
+                 principal_point_x_pixel: float,
+                 principal_point_y_pixel: float,
                  debug_flag: bool = False):
         self.robot_height_in_meter = robot_height_in_meter
-        self.camera_intrinsic = camera_intrinsic
+        self.camera_intrinsic = get_intrinsic_matrix(focal_length_x_pixel=focal_length_x_pixel,
+                                                     focal_length_y_pixel=focal_length_y_pixel,
+                                                     skew=skew,
+                                                     principal_point_x_pixel=principal_point_x_pixel,
+                                                     principal_point_y_pixel=principal_point_y_pixel)
+        self.camera_intrinsic_inv = np.linalg.inv(self.camera_intrinsic)
         self.current_frame_number = 0
         self.init_motion_estimation()
         self.debug_flag = debug_flag
@@ -269,6 +276,25 @@ class RobotHorizontalMotionEstimator:
         self.previous_frame_data = None
         self.motion_estimation_status = MotionEstimationStatus.MOTION_WAITING_FOR_FIRST_FRAME
         self.current_robot_pose = None
+
+    def init_features_handler(self, prepared_frame: np.ndarray):
+        """
+        This method attempts to choose a features extractor, for an unknown environment
+        """
+        # try ORB features handler
+        self.features_handler = OrbFeaturesHandler()
+        if self.features_handler.is_handler_capable(frame=prepared_frame):
+            # ORB is capable of handling current scene
+            return
+
+        # try Shi-Tomasi
+        self.features_handler = ShiTomasiFeaturesHandler()
+        if self.features_handler.is_handler_capable(frame=prepared_frame):
+            # Shi-Tomasi is capable of handling current scene
+            return
+
+        # could not find suitable features handler
+        self.motion_estimation_status = MotionEstimationStatus.MOTION_ALGORITHM_INCAPABLE
 
     def set_new_frame(self, raw_frame: np.ndarray):
         """
@@ -283,7 +309,8 @@ class RobotHorizontalMotionEstimator:
         """
         self.current_frame_number += 1
         prepared_frame: np.ndarray = self.prepare_frame(frame=raw_frame)
-        if self.motion_estimation_status == MotionEstimationStatus.MOTION_WAITING_FOR_FIRST_FRAME:
+        if self.motion_estimation_status in (MotionEstimationStatus.MOTION_WAITING_FOR_FIRST_FRAME,
+                                             MotionEstimationStatus.MOTION_ALGORITHM_INCAPABLE):
             self.init_features_handler(prepared_frame)
         try:
             self.update_motion_using_new_frame(frame=prepared_frame)
@@ -306,7 +333,7 @@ class RobotHorizontalMotionEstimator:
         """
         return self.features_handler.extract_features(frame=frame)
 
-    def update_motion_using_new_frame(self, frame: np.ndarray) -> Optional[Tuple]:
+    def update_motion_using_new_frame(self, frame: np.ndarray):
         """
         This method
         Parameters
@@ -367,9 +394,6 @@ class RobotHorizontalMotionEstimator:
                                                                         list_of_matches,
                                                                         None,
                                                                         flags=2)))
-
-        # self.get_camera_motion_using_homography(src_pts, dst_pts)
-        # self.get_camera_motion_using_epipolar_constraint(src_pts, dst_pts)
         self.get_camera_motion_using_PnP(list_of_matches,
                                          new_processed_frame_data=new_processed_frame_data)
 
@@ -390,133 +414,104 @@ class RobotHorizontalMotionEstimator:
             print("frame #{0:d} | Robot motion unavailable - cannot handle this type of scene".format(
                 self.current_frame_number))
 
-    def get_camera_motion_using_homography(self, src_pts, dst_pts):
-        """
-        https://stackoverflow.com/questions/35942095/opencv-strange-rotation-and-translation-matrices-from-decomposehomographymat
-        """
-
-        M, mask = findHomography(src_pts, dst_pts, RANSAC, 5.0)
-        num_res, Rs, ts, n = decomposeHomographyMat(H=M, K=self.camera_intrinsic.astype(np.float32))
-
-        print("-------------------------------------------\n")
-        print("Estimated decomposition:\n\n")
-        for i, Rt in enumerate(zip(Rs, ts)):
-            R, t = Rt
-            print("option " + str(i + 1))
-            print("rvec = ")
-            rvec, _ = Rodrigues(R)
-            print(rvec * 180 / np.pi)
-            print("t = ")
-            print(t)
-
-    def get_camera_motion_using_epipolar_constraint(self, src_pts, dst_pts):
-        E, _ = findEssentialMat(points1=src_pts,
-                                points2=dst_pts,
-                                cameraMatrix=self.camera_intrinsic,
-                                method=RANSAC,
-                                prob=self.DEFAULT_NISTER_PROB,
-                                threshold=self.DEFAULT_NISTER_THRESHOLD)
-        # decompose essential matrix
-        R1, R2, t = decomposeEssentialMat(E)
-        print("Rotation #1 = {0:s}".format(str(Rodrigues(R1)[0])))
-        print("Rotation #2 = {0:s}".format(str(Rodrigues(R2)[0])))
-        print("Translation = {0:s}".format(str(t)))
-        return R1, R2, t
-
     def get_camera_motion_using_PnP(self, list_of_matches: List[DMatch],
                                     new_processed_frame_data: ProcessedFrameData):
         """
         This method estimates camera motion using the following steps:
         1. receive a set of 2D features, matched between the 1-st and the 2-nd frame
-        2. estimate the 3D locations of the features, using their coordinates in the 1-st frame and the camera height
+        2. estimate the 3D locations of the features, using their 2d-coords in the 1-st frame and the camera height
         3. solve the 2-nd frame camera pose, with the help of the PnP algorithm, by using the estimated 3D locations
-            and their coordinates in the 2-nd frame
+        and their 2d-coords in the 2-nd frame
+
+        https://www.imatest.com/support/docs/pre-5-2/geometric-calibration/projective-camera/
+
+        Estimation of 3D locations, w.r.t to the 1-st camera frame, is performed by inverting their projection in the
+        1-st camera frame, knowing the height of the camera (H) (scale):
+        p_cam_homogeneous = K * [R | t] * P_world_homogeneous
+        p_cam_homogeneous = s * [u, v, 1]'
+        s * [u, v, 1]' = K * [I | 0] * [X Y H 1]' (R=I and t=0, for 1-st camera w.r.t 1-st camera frame)
+                      = K * [X Y H]'
+        -> s = H (scale, or depth of scene)
+        H * [u, v, 1]' = K * [X Y H]'
+        -> [X Y Z]' = H * K^(-1) * [u, v, 1]'
         """
 
-        L: int = len(list_of_matches)
-        array_of_3D_location: np.ndarray = np.empty((L, 3))
-        array_of_2D_coords_first_frame: np.ndarray = np.empty((L, 2))
-        array_of_2D_coords_second_frame: np.ndarray = np.empty((L, 2))
-        H: float = self.robot_height_in_meter
-        K_inv: np.ndarray = np.linalg.inv(self.camera_intrinsic)
-        fx: float = self.camera_intrinsic[0, 0]
-        fy: float = self.camera_intrinsic[1, 1]
-        for match_idx, match in enumerate(list_of_matches):
-            # estimate 3D location of feature, using 1-st frame coordinates
-            first_frame_feature_coords = self.previous_frame_data.list_of_keypoints[match.queryIdx].pt
-            second_frame_feature_coords = new_processed_frame_data.list_of_keypoints[match.trainIdx].pt
-            # array_of_3D_location[match_idx, :] = H * np.array([first_frame_feature_coords[0] / fx,
-            #                                                    first_frame_feature_coords[1] / fy,
-            #                                                    1.0])
-            array_of_3D_location[match_idx, :] = K_inv @ np.array([H * first_frame_feature_coords[0],
-                                                                   H * first_frame_feature_coords[1],
-                                                                   H])
-            array_of_2D_coords_first_frame[match_idx, :] = np.array([first_frame_feature_coords[0],
-                                                                     first_frame_feature_coords[1]])
-            array_of_2D_coords_second_frame[match_idx, :] = np.array([second_frame_feature_coords[0],
-                                                                      second_frame_feature_coords[1]])
+        N: int = len(list_of_matches)
 
-        # check re-projection of 3D points
-        re_project, _ = projectPoints(objectPoints=array_of_3D_location,
+        # construct array of feature locations, in previous frame (Nx2)
+        array_of_2d_coords_previous_frame = np.array(
+            [self.previous_frame_data.list_of_keypoints[match.queryIdx].pt for match in list_of_matches])
+
+        # estimate array of 3D feature locations, w.r.t previous camera frame (3xN)
+        estimated_array_of_3d_coords_previous_frame = self.robot_height_in_meter * self.camera_intrinsic_inv @ np.array(
+            np.vstack((array_of_2d_coords_previous_frame.T,
+                       np.ones((1, N)))))
+        # transpose to Nx3, for future use
+        estimated_array_of_3d_coords_previous_frame = estimated_array_of_3d_coords_previous_frame.T
+
+        # construct array of matched feature locations, in new frame (Nx2)
+        array_of_2d_coords_new_frame = np.array(
+            [new_processed_frame_data.list_of_keypoints[match.trainIdx].pt for match in list_of_matches])
+
+        # check re-projection of 3D points to 2D pixels
+        re_project, _ = projectPoints(objectPoints=estimated_array_of_3d_coords_previous_frame,
                                       rvec=np.zeros(3),
                                       tvec=np.zeros(3),
                                       cameraMatrix=self.camera_intrinsic,
                                       distCoeffs=None)
 
-        # TODO add test for re-projection error
-        reprojection_error = np.linalg.norm(x=re_project.squeeze() - array_of_2D_coords_first_frame,
-                                            ord=2)
-
-        retval, rotation_vector, tvec, inliers = solvePnPRansac(objectPoints=array_of_3D_location,
-                                                                imagePoints=array_of_2D_coords_second_frame,
-                                                                cameraMatrix=self.camera_intrinsic,
-                                                                distCoeffs=None)
-        # convert rotation vector to rotation matrix
-
-        yaw_rad, pitch_rad, roll_rad = get_euler_angles_from_rotation_matrix_ZYX_order(
-            Rodrigues(src=rotation_vector)[0])
-        if retval:
-            self.motion_estimation_status = MotionEstimationStatus.MOTION_OK
-            self.current_robot_pose = RobotPose.build(position_x_meter=tvec[0][0],
-                                                      position_y_meter=tvec[1][0],
-                                                      yaw_angle_deg=radiansToDegrees * yaw_rad)
-
-    def init_features_handler(self, prepared_frame: np.ndarray):
-        """
-        This method attempts to choose a features extractor, for an unknown environment
-        """
-        # try ORB features handler
-        self.features_handler = OrbFeaturesHandler()
-        if self.features_handler.is_handler_capable(frame=prepared_frame):
-            # ORB is capable of handling current scene
+        max_reprojection_error = np.max(np.abs(re_project.squeeze() - array_of_2d_coords_previous_frame))
+        if max_reprojection_error > self.REPROJECTION_TOLERANCE:
+            print("3D re-projection fail, aborting motion estimation")
+            self.motion_estimation_status = MotionEstimationStatus.MOTION_NOT_UPDATED
             return
-        # try Shi-Tomasi
-        self.features_handler = ShiTomasiFeaturesHandler()
-        if self.features_handler.is_handler_capable(frame=prepared_frame):
-            # Shi-Tomasi is capable of handling current scene
+
+        return_flag, est_rotation_vector, est_translation, inliers = solvePnPRansac(
+            objectPoints=estimated_array_of_3d_coords_previous_frame,
+            imagePoints=array_of_2d_coords_new_frame,
+            cameraMatrix=self.camera_intrinsic,
+            distCoeffs=None)
+
+        if not return_flag:
+            print("PnP fail, aborting motion estimation")
+            self.motion_estimation_status = MotionEstimationStatus.MOTION_NOT_UPDATED
+
+        # check amount of outliers from RANSAC
+        if len(inliers) < int(N * 0.9):
+            # TODO useful number
+            print("PnP RANSAC fail, aborting motion estimation")
+            self.motion_estimation_status = MotionEstimationStatus.MOTION_NOT_UPDATED
             return
-        self.motion_estimation_status = MotionEstimationStatus.MOTION_ALGORITHM_INCAPABLE
-        self.features_handler = None
+
+        # convert rotation vector to rotation matrix, to extract yaw angle
+        euler_angles: EulerAngles = get_euler_angles_from_rotation_matrix_ZYX_order(
+            Rodrigues(src=est_rotation_vector)[0])
+
+        self.motion_estimation_status = MotionEstimationStatus.MOTION_OK
+        self.current_robot_pose = RobotPose.build(position_x_meter=est_translation[0][0],
+                                                  position_y_meter=est_translation[1][0],
+                                                  yaw_angle_deg=radiansToDegrees * euler_angles.yaw_rad)
 
 
 if __name__ == "__main__":
     current_dir: str = os.getcwd()
     list_of_frame_paths: List[str] = list()
-    test_dir_str: str = 'test_mosaic'
+    test_dir_str: str = 'test_floorplan'
     list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_1.png'))
     list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_2.png'))
-    # list_of_frame_paths.append(os.path.join(current_dir, test_dir_str,'frame_3.png'))
-    # list_of_frame_paths.append(os.path.join(current_dir, test_dir_str,'frame_4.png'))
-    # list_of_frame_paths.append(os.path.join(current_dir, test_dir_str,'frame_5.png'))
-    # list_of_frame_paths.append(os.path.join(current_dir, test_dir_str,'frame_6.png'))
+    list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_3.png'))
+    list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_4.png'))
+    list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_5.png'))
+    list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_6.png'))
 
     robot_height_in_meter = 2.5
-    camera_intrinsic: np.ndarray = np.array([[1422.0, .0, 1024.0 / 2],
-                                             [.0, 1422.0, 768.0 / 2],
-                                             [.0, .0, 1.0]])
     robot_motion_estimator: RobotHorizontalMotionEstimator = RobotHorizontalMotionEstimator(
         robot_height_in_meter=robot_height_in_meter,
-        camera_intrinsic=camera_intrinsic,
+        focal_length_x_pixel=1422.0,
+        focal_length_y_pixel=1422.0,
+        skew=.0,
+        principal_point_x_pixel=1024.0 / 2,
+        principal_point_y_pixel=768.0 / 2,
         debug_flag=True)
 
     for frame_path in list_of_frame_paths:
