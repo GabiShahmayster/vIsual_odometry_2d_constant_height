@@ -570,13 +570,43 @@ class RobotHorizontalMotionEstimator:
 
 
 if __name__ == "__main__":
-    #___example 1____
-    # run motion estimation on frames in folder ./test_mosaic, which contains 6 PNG files
+    # test images folders are: 'test_mosaic','test_mosaic_rotation', 'test_mosaic_height',
+
+    # ___example 1 - mosaic, translation and rotation____
+    # run motion estimation on frames in folder ./test_mosaic
     # (images were generated with larger motion than required)
-    # other test images folders are: 'test_mosaic_rotation', 'test_mosaic_height',
+
+    # current_dir: str = os.getcwd()
+    # test_dir_str: str = os.path.join(current_dir, 'test_mosaic')
+    # robot_height_in_meter = 2.5
+    # focal_length_x_pixel = 1422.0
+    # focal_length_y_pixel = focal_length_x_pixel
+    # skew = .0
+    # principal_point_x_pixel = 1024.0 / 2
+    # principal_point_y_pixel = 768.0 / 2
+    # debug_flag = False
+    # robot_max_speed_m_sec = 1.0
+    # camera_fps = 1
+
+    # ___example 2 - mosaic, rotation____
+    # run motion estimation on frames in folder ./test_mosaic_rotation
+    # current_dir: str = os.getcwd()
+    # test_dir_str: str = os.path.join(current_dir, 'test_mosaic_rotation')
+    # robot_height_in_meter = 2.5
+    # focal_length_x_pixel = 1422.0
+    # focal_length_y_pixel = focal_length_x_pixel
+    # skew = .0
+    # principal_point_x_pixel = 1024.0 / 2
+    # principal_point_y_pixel = 768.0 / 2
+    # debug_flag = False
+    # robot_max_speed_m_sec = 1.0
+    # camera_fps = 1
+
+    # ___example 3 - mosaic, translation different height____
+    # run motion estimation on frames in folder ./test_mosaic_height
     current_dir: str = os.getcwd()
     test_dir_str: str = os.path.join(current_dir, 'test_mosaic_height')
-    robot_height_in_meter = 2.5
+    robot_height_in_meter = 3.7
     focal_length_x_pixel = 1422.0
     focal_length_y_pixel = focal_length_x_pixel
     skew = .0
