@@ -9,6 +9,7 @@ from recordclass import RecordClass
 from collections import namedtuple
 from abc import ABC, abstractmethod
 from enum import Enum
+import glob
 
 radiansToDegrees: float = 1 / np.pi * 180.0
 EulerAngles = namedtuple('EulerAngles', ['yaw_rad', 'pitch_rad', 'roll_rad'])
@@ -285,12 +286,14 @@ class RobotHorizontalMotionEstimator:
         self.features_handler = OrbFeaturesHandler()
         if self.features_handler.is_handler_capable(frame=prepared_frame):
             # ORB is capable of handling current scene
+            print("Selecting ORB features based motion tracker")
             return
 
         # try Shi-Tomasi
         self.features_handler = ShiTomasiFeaturesHandler()
         if self.features_handler.is_handler_capable(frame=prepared_frame):
             # Shi-Tomasi is capable of handling current scene
+            print("Selecting Shi-Tomasi features based motion tracker")
             return
 
         # could not find suitable features handler
@@ -387,7 +390,8 @@ class RobotHorizontalMotionEstimator:
                                                                              frame_2=new_processed_frame_data)
         list_of_matches = list_of_matches[:100]
         if self.debug_flag:
-            imshow("feature matches", mat=self.resize_image(drawMatches(self.previous_frame_data.frame,
+            imshow("feature matches frame #{0:d}->#{1:d}".format(self.current_frame_number-1,
+                                                                 self.current_frame_number), mat=self.resize_image(drawMatches(self.previous_frame_data.frame,
                                                                         self.previous_frame_data.list_of_keypoints,
                                                                         new_processed_frame_data.frame,
                                                                         new_processed_frame_data.list_of_keypoints,
@@ -402,10 +406,11 @@ class RobotHorizontalMotionEstimator:
         This method prints the current position of the robot, if available
         """
         if self.motion_estimation_status == MotionEstimationStatus.MOTION_OK:
-            print("frame #{0:d} | Robot motion: X = {1:f} [m] Y = {2:f} [m] | rotation: heading = {3:f} [deg]".format(
+            print("frame #{0:d} | Robot motion: X = {1:f} [m] Y = {2:f} [m] | rotation: yaw = {3:f} [deg]".format(
                 self.current_frame_number,
                 self.current_robot_pose.position_x_meter,
-                self.current_robot_pose.position_y_meter, self.current_robot_pose.yaw_angle_deg))
+                self.current_robot_pose.position_y_meter,
+                self.current_robot_pose.yaw_angle_deg))
         elif self.motion_estimation_status == MotionEstimationStatus.MOTION_WAITING_FOR_FIRST_FRAME:
             print("frame #{0:d} | Robot motion unavailable - waiting for 1-st frame".format(self.current_frame_number))
         elif self.motion_estimation_status == MotionEstimationStatus.MOTION_NOT_UPDATED:
@@ -419,34 +424,43 @@ class RobotHorizontalMotionEstimator:
         """
         This method estimates camera motion using the following steps:
         1. receive a set of 2D features, matched between the 1-st and the 2-nd frame
-        2. estimate the 3D locations of the features, using their 2d-coords in the 1-st frame and the camera height
-        3. solve the 2-nd frame camera pose, with the help of the PnP algorithm, by using the estimated 3D locations
-        and their 2d-coords in the 2-nd frame
+        2. (3d mapping) localize 3D location of features, using their 2d projection and camera height
+        3. (camera localization) solve the 2-nd frame camera pose, with the help of the PnP algorithm, by using the
+        mapped 3D locations of the features and their 2-nd frame 2d projections
 
-        https://www.imatest.com/support/docs/pre-5-2/geometric-calibration/projective-camera/
-
-        Estimation of 3D locations, w.r.t to the 1-st camera frame, is performed by inverting their projection in the
-        1-st camera frame, knowing the height of the camera (H) (scale):
+        Estimation of 3D feature location, w.r.t to the 1-st camera frame, is performed by inverting their projection in the
+        1-st camera frame + known camera height (H):
         p_cam_homogeneous = K * [R | t] * P_world_homogeneous
+        where:
+        p_cam_homogeneous - homogeneous coordinates of feature in frame
+        P_world_homogeneous - homogeneous coordinates of feature in 3D world
+
         p_cam_homogeneous = s * [u, v, 1]'
         s * [u, v, 1]' = K * [I | 0] * [X Y H 1]' (R=I and t=0, for 1-st camera w.r.t 1-st camera frame)
                       = K * [X Y H]'
-        -> s = H (scale, or depth of scene)
+        -> s = H (scale/depth of scene, extracted from 3-rd component)
         H * [u, v, 1]' = K * [X Y H]'
-        -> [X Y Z]' = H * K^(-1) * [u, v, 1]'
+        -> [X Y H]' = H * K^(-1) * [u, v, 1]'
+
+        vectorize for all features:
+        [X_1 X_2 ... X_N                   [u_1 u_2 ... u_N
+         Y_1 Y_2 ... Y_N   =  H * K^(-1) *  v_1 v_2 ... v_N
+         H   H   ... H  ]                     1     ...   1]
         """
 
         N: int = len(list_of_matches)
+        H: float = self.robot_height_in_meter
+        K_inv: np.ndarray = self.camera_intrinsic_inv
 
         # construct array of feature locations, in previous frame (Nx2)
         array_of_2d_coords_previous_frame = np.array(
             [self.previous_frame_data.list_of_keypoints[match.queryIdx].pt for match in list_of_matches])
 
         # estimate array of 3D feature locations, w.r.t previous camera frame (3xN)
-        estimated_array_of_3d_coords_previous_frame = self.robot_height_in_meter * self.camera_intrinsic_inv @ np.array(
+        estimated_array_of_3d_coords_previous_frame = H * K_inv @ np.array(
             np.vstack((array_of_2d_coords_previous_frame.T,
                        np.ones((1, N)))))
-        # transpose to Nx3, for future use
+        # transpose to Nx3, for future use by opencv methods
         estimated_array_of_3d_coords_previous_frame = estimated_array_of_3d_coords_previous_frame.T
 
         # construct array of matched feature locations, in new frame (Nx2)
@@ -488,21 +502,18 @@ class RobotHorizontalMotionEstimator:
             Rodrigues(src=est_rotation_vector)[0])
 
         self.motion_estimation_status = MotionEstimationStatus.MOTION_OK
-        self.current_robot_pose = RobotPose.build(position_x_meter=est_translation[0][0],
-                                                  position_y_meter=est_translation[1][0],
-                                                  yaw_angle_deg=radiansToDegrees * euler_angles.yaw_rad)
+
+        # we have recovered the pose of the camera in the 2-nd frame
+        # TODO fix motion definition
+        self.current_robot_pose = RobotPose.build(position_x_meter=(-1) * est_translation[0][0],
+                                                  position_y_meter=(-1) * est_translation[1][0],
+                                                  yaw_angle_deg=(-1)* radiansToDegrees * euler_angles.yaw_rad)
 
 
 if __name__ == "__main__":
     current_dir: str = os.getcwd()
     list_of_frame_paths: List[str] = list()
-    test_dir_str: str = 'test_floorplan'
-    list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_1.png'))
-    list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_2.png'))
-    list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_3.png'))
-    list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_4.png'))
-    list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_5.png'))
-    list_of_frame_paths.append(os.path.join(current_dir, test_dir_str, 'frame_6.png'))
+    test_dir_str: str = os.path.join(current_dir,'test_mosaic_height')
 
     robot_height_in_meter = 2.5
     robot_motion_estimator: RobotHorizontalMotionEstimator = RobotHorizontalMotionEstimator(
@@ -512,9 +523,9 @@ if __name__ == "__main__":
         skew=.0,
         principal_point_x_pixel=1024.0 / 2,
         principal_point_y_pixel=768.0 / 2,
-        debug_flag=True)
+        debug_flag=False)
 
-    for frame_path in list_of_frame_paths:
+    for frame_path in sorted(glob.glob(pathname=os.path.join(test_dir_str,'*.png'))):
         frame: Optional[np.ndarray] = imread(frame_path)
         if frame is not None:
             robot_motion_estimator.set_new_frame(raw_frame=frame)
