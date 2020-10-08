@@ -465,9 +465,8 @@ class RobotHorizontalMotionEstimator:
         """
         This method estimates camera motion using the following steps, which can be considered as primitive SLAM:
         1. receive a set of N 2D features, matched between the 1-st and the 2-nd frame
-        2. (3d mapping/reconstruction) localize 3D location of features, using their projection on 1-st frame and camera height
-        3. (camera localization) solve the 2-nd frame camera pose, with the help of the PnP algorithm, by using reconstructed
-        3D locations of the features and projections on 2-nd frame
+        2. (3d mapping/reconstruction) localize 3D location of features on floor, using 1-st frame coordinates and camera height
+        3. (camera localization) solve the 2-nd frame camera pose w.r.t 3d features, using PnP+RANSAC
 
         Estimation of 3D feature location, w.r.t to the 1-st camera frame, is performed by inverting their projection in the
         1-st camera frame + known camera height (h_cam):
@@ -533,12 +532,19 @@ class RobotHorizontalMotionEstimator:
             print("PnP fail, aborting motion estimation")
             self.motion_estimation_status = MotionEstimationStatus.MOTION_NOT_UPDATED
 
-        # we have recovered the pose of the object in the 2-nd camera frame
-        # but we need to compute the pose of the 2-nd camera w.r.t the object frame (world frame)
+        # we have recovered the pose of the world w.r.t to the 2-nd camera frame
+        # but we are interested in the motion of the camera, w.r.t to the world frame, which means that we need
+        # the inverse transformation, which is the pose of the camera w.r.t the world
+        # the recovered transformation, represented as homogeneous transformation matrix is:
+        # T = [R t]
+        #      0 1]
+        # and the inverse transformation is:
+        # T^(-1) = [R' -R'*t
+        #           0      1]
         object_rotation: np.ndarray = Rodrigues(src=est_rotation_vector)[0]
 
         camera_rotation: np.ndarray = object_rotation.T
-        camera_translation: np.ndarray = - object_rotation.T @ object_translation
+        camera_translation: np.ndarray = -camera_rotation @ object_translation
         # convert rotation vector to rotation matrix, to extract yaw angle
         euler_angles: EulerAngles = get_euler_angles_from_rotation_matrix_ZYX_order(camera_rotation)
 
@@ -566,7 +572,7 @@ class RobotHorizontalMotionEstimator:
 if __name__ == "__main__":
     current_dir: str = os.getcwd()
     list_of_frame_paths: List[str] = list()
-    test_dir_str: str = os.path.join(current_dir, 'test_mosaic_rotation')
+    test_dir_str: str = os.path.join(current_dir, 'test_mosaic')
 
     robot_height_in_meter = 2.5
     robot_motion_estimator: RobotHorizontalMotionEstimator = RobotHorizontalMotionEstimator(
@@ -577,7 +583,7 @@ if __name__ == "__main__":
         principal_point_x_pixel=1024.0 / 2,
         principal_point_y_pixel=768.0 / 2,
         debug_flag=False,
-        robot_max_speed_m_sec=.5,
+        robot_max_speed_m_sec=1.0,
         camera_fps=1)
 
     for frame_path in sorted(glob.glob(pathname=os.path.join(test_dir_str, '*.png'))):
@@ -589,5 +595,6 @@ if __name__ == "__main__":
             print("Error! cannot read frame at location = {0:s}".format(frame_path))
             print("Aborting motion estimation")
             exit(1)
+
     waitKey(0)
     exit(0)
