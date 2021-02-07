@@ -531,6 +531,7 @@ class RobotHorizontalMotionEstimator:
         if not return_flag:
             print("PnP fail, aborting motion estimation")
             self.motion_estimation_status = MotionEstimationStatus.MOTION_NOT_UPDATED
+            return
 
         # we have recovered the pose of the world w.r.t to the 2-nd camera frame
         # but we are interested in the motion of the camera, w.r.t to the world frame, which means that we need
@@ -576,17 +577,17 @@ if __name__ == "__main__":
     # run motion estimation on frames in folder ./test_mosaic
     # (images were generated with larger motion than required)
 
-    # current_dir: str = os.getcwd()
-    # test_dir_str: str = os.path.join(current_dir, 'test_mosaic')
-    # robot_height_in_meter = 2.5
-    # focal_length_x_pixel = 1422.0
-    # focal_length_y_pixel = focal_length_x_pixel
-    # skew = .0
-    # principal_point_x_pixel = 1024.0 / 2
-    # principal_point_y_pixel = 768.0 / 2
-    # debug_flag = False
-    # robot_max_speed_m_sec = 1.0
-    # camera_fps = 1
+    current_dir: str = os.getcwd()
+    test_dir_str: str = os.path.join(current_dir, 'test_mosaic')
+    robot_height_in_meter = 2.5
+    focal_length_x_pixel = 1422.0
+    focal_length_y_pixel = focal_length_x_pixel
+    skew = .0
+    principal_point_x_pixel = 1024.0 / 2
+    principal_point_y_pixel = 768.0 / 2
+    debug_flag = False
+    robot_max_speed_m_sec = 1.0
+    camera_fps = 1
 
     # ___example 2 - mosaic, rotation____
     # run motion estimation on frames in folder ./test_mosaic_rotation
@@ -604,19 +605,32 @@ if __name__ == "__main__":
 
     # ___example 3 - mosaic, translation different height____
     # run motion estimation on frames in folder ./test_mosaic_height
-    current_dir: str = os.getcwd()
-    test_dir_str: str = os.path.join(current_dir, 'test_mosaic_height')
-    robot_height_in_meter = 3.7
-    focal_length_x_pixel = 1422.0
-    focal_length_y_pixel = focal_length_x_pixel
-    skew = .0
-    principal_point_x_pixel = 1024.0 / 2
-    principal_point_y_pixel = 768.0 / 2
-    debug_flag = False
-    robot_max_speed_m_sec = 1.0
-    camera_fps = 1
+    # current_dir: str = os.getcwd()
+    # test_dir_str: str = os.path.join(current_dir, 'test_mosaic_height')
+    # robot_height_in_meter = 3.7
+    # focal_length_x_pixel = 1422.0
+    # focal_length_y_pixel = focal_length_x_pixel
+    # skew = .0
+    # principal_point_x_pixel = 1024.0 / 2
+    # principal_point_y_pixel = 768.0 / 2
+    # debug_flag = False
+    # robot_max_speed_m_sec = 1.0
+    # camera_fps = 1
 
-    #___svetlana_test___
+    # ___example 3 - hardwood (FAIL)____
+    # run motion estimation on frames in folder ./test_mosaic_height
+    # current_dir: str = os.getcwd()
+    # test_dir_str: str = os.path.join(current_dir, 'test_hardwood')
+    # robot_height_in_meter = 2.5
+    # focal_length_x_pixel = 1422.0
+    # focal_length_y_pixel = focal_length_x_pixel
+    # skew = .0
+    # principal_point_x_pixel = 1024.0 / 2
+    # principal_point_y_pixel = 768.0 / 2
+    # debug_flag = False
+    # robot_max_speed_m_sec = 1.0
+    # camera_fps = 1
+
     # test_dir_str: str =
     # robot_height_in_meter: float =
     # focal_length_x_pixel: float =
