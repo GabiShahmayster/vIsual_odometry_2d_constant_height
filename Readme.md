@@ -31,3 +31,5 @@ An attempt was made to introduce a "self-tuning" capability, to cope with low-fe
 1. Attempt to track 1000 ORB features
 2. if 1 fails -> Attempt to track 500 ORB features (assume that it's a low-featured scene, so that stage 1 was looking for too many features)
 3. if 2 failes -> Attempt to use Lucas-Kanade sparse optical-flow, instead of ORB features (assume that it's a very low-feature or repetetive scene)
+
+![Image description](https://github.com/GabiShahmayster/VIsual_Odometry_2D_Constant_Height/blob/master/tracking_example.png)
